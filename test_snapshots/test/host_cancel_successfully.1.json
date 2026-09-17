@@ -493,6 +493,14 @@
                     "val": {
                       "bool": true
                     }
+                  },
+                  {
+                    "key": {
+                      "symbol": "was_disputed"
+                    },
+                    "val": {
+                      "bool": false
+                    }
                   }
                 ]
               }

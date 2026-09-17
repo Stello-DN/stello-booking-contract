@@ -419,6 +419,14 @@
                     "val": {
                       "bool": false
                     }
+                  },
+                  {
+                    "key": {
+                      "symbol": "was_disputed"
+                    },
+                    "val": {
+                      "bool": false
+                    }
                   }
                 ]
               }
@@ -571,6 +579,14 @@
                   {
                     "key": {
                       "symbol": "was_cancelled"
+                    },
+                    "val": {
+                      "bool": false
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "was_disputed"
                     },
                     "val": {
                       "bool": false

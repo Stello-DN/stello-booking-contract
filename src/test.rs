@@ -115,6 +115,7 @@ impl TestCtx {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_contract(
     env: &Env,
     stello: &Address,
@@ -233,6 +234,7 @@ fn valid_lifecycle_created_escrowed_checked_in_completed() {
         BookingState::Completed
     );
     assert_eq!(ctx.token_client().balance(&ctx.contract_id), amount);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
 }
 
 #[test]
@@ -1220,6 +1222,7 @@ fn open_dispute_freezes_escrow() {
     ctx.client().open_dispute(&booking_id);
     let b = ctx.client().get_booking(&booking_id);
     assert_eq!(b.state, BookingState::Disputed);
+    assert!(b.was_disputed);
     assert!(!b.settled);
     assert_eq!(b.escrow_amount, amount);
     assert_eq!(ctx.token_client().balance(&ctx.contract_id), amount);
@@ -1279,6 +1282,7 @@ fn resolve_dispute_custom_bps_pushes_all_parties() {
     let b = ctx.client().get_booking(&booking_id);
     assert_eq!(b.state, BookingState::Completed);
     assert!(b.settled);
+    assert!(b.was_disputed);
     assert_eq!(b.escrow_amount, 0);
 
     assert_eq!(ctx.token_client().balance(&ctx.traveller), 4000);
@@ -1323,10 +1327,10 @@ fn resolve_dispute_rejects_invalid_bps_sum() {
             .try_resolve_dispute(&booking_id, &5000, &4000, &0, &0, &0, &0),
         Err(Ok(Error::InvalidBpsAllocation))
     );
-    assert_eq!(
-        ctx.client().get_booking(&booking_id).state,
-        BookingState::Disputed
-    );
+    let b = ctx.client().get_booking(&booking_id);
+    assert_eq!(b.state, BookingState::Disputed);
+    assert!(b.was_disputed);
+    assert!(!b.settled);
     assert_eq!(ctx.token_client().balance(&ctx.contract_id), amount);
 }
 
@@ -1368,10 +1372,16 @@ fn open_dispute_rejects_invalid_state() {
     let ctx = setup();
     let amount = 100i128;
     let booking_id = ctx.fund_and_book(amount, 1_000_000);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
     assert_eq!(
         ctx.client().try_open_dispute(&booking_id),
         Err(Ok(Error::InvalidStateTransition))
     );
+    assert_eq!(
+        ctx.client().get_booking(&booking_id).state,
+        BookingState::Created
+    );
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
 
     // CheckedIn (not Escrowed/Completed) cannot open dispute.
     ctx.client().lock_escrow(&booking_id, &amount);
@@ -1380,6 +1390,11 @@ fn open_dispute_rejects_invalid_state() {
         ctx.client().try_open_dispute(&booking_id),
         Err(Ok(Error::InvalidStateTransition))
     );
+    assert_eq!(
+        ctx.client().get_booking(&booking_id).state,
+        BookingState::CheckedIn
+    );
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
 }
 
 #[test]
@@ -1430,6 +1445,12 @@ fn open_dispute_rejects_unauthorized() {
             .try_resolve_dispute(&booking_id, &10000, &0, &0, &0, &0, &0)
             .is_err()
     );
+
+    // Unauthorized open_dispute must leave state and was_disputed untouched.
+    env.mock_all_auths();
+    let b = client.get_booking(&booking_id);
+    assert_eq!(b.state, BookingState::Escrowed);
+    assert!(!b.was_disputed);
 }
 
 // --- Push-only accounting & hardening ---
@@ -1928,6 +1949,7 @@ fn open_dispute_allowed_for_completed_unsettled() {
         ctx.client().get_booking(&booking_id).state,
         BookingState::Disputed
     );
+    assert!(ctx.client().get_booking(&booking_id).was_disputed);
 }
 
 // --- Address collision hardening ---
@@ -2849,4 +2871,194 @@ fn upgrade_does_not_weaken_lock_escrow_traveller_auth() {
     // Sanity: existing traveller-only lock_escrow auth still required.
     ctx.env.set_auths(&[]);
     assert!(ctx.client().try_lock_escrow(&id, &amount).is_err());
+}
+
+// --- was_disputed irreversible historical flag ---
+
+#[test]
+fn new_booking_has_was_disputed_false() {
+    let ctx = setup();
+    let booking_id = ctx.fund_and_book(100, 1_000_000);
+    let b = ctx.client().get_booking(&booking_id);
+    assert!(!b.was_disputed);
+    assert_eq!(b.state, BookingState::Created);
+}
+
+#[test]
+fn open_dispute_from_escrowed_sets_was_disputed() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.reach_escrowed(amount, 1_000_000);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
+
+    ctx.client().open_dispute(&booking_id);
+    let b = ctx.client().get_booking(&booking_id);
+    assert_eq!(b.state, BookingState::Disputed);
+    assert!(b.was_disputed);
+}
+
+#[test]
+fn open_dispute_from_completed_unsettled_sets_was_disputed() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.reach_completed(amount);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
+
+    ctx.client().open_dispute(&booking_id);
+    let b = ctx.client().get_booking(&booking_id);
+    assert_eq!(b.state, BookingState::Disputed);
+    assert!(b.was_disputed);
+}
+
+#[test]
+fn resolve_dispute_preserves_was_disputed_true() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.reach_escrowed(amount, 1_000_000);
+    ctx.client().open_dispute(&booking_id);
+    assert!(ctx.client().get_booking(&booking_id).was_disputed);
+
+    ctx.client()
+        .resolve_dispute(&booking_id, &10_000, &0, &0, &0, &0, &0);
+    let b = ctx.client().get_booking(&booking_id);
+    assert_eq!(b.state, BookingState::Completed);
+    assert!(b.settled);
+    assert!(b.was_disputed);
+    assert!(!b.was_cancelled);
+}
+
+#[test]
+fn failed_resolve_dispute_does_not_clear_was_disputed() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.reach_escrowed(amount, 1_000_000);
+    ctx.client().open_dispute(&booking_id);
+
+    assert_eq!(
+        ctx.client()
+            .try_resolve_dispute(&booking_id, &5_000, &4_000, &0, &0, &0, &0),
+        Err(Ok(Error::InvalidBpsAllocation))
+    );
+    let b = ctx.client().get_booking(&booking_id);
+    assert_eq!(b.state, BookingState::Disputed);
+    assert!(b.was_disputed);
+    assert!(!b.settled);
+}
+
+#[test]
+fn completion_and_settlement_without_dispute_keeps_was_disputed_false() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.reach_completed(amount);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
+
+    ctx.client().execute_split(&booking_id);
+    let b = ctx.client().get_booking(&booking_id);
+    assert_eq!(b.state, BookingState::Completed);
+    assert!(b.settled);
+    assert!(!b.was_disputed);
+}
+
+#[test]
+fn cancellation_without_dispute_keeps_was_disputed_false() {
+    let ctx = setup();
+    ctx.env.ledger().with_mut(|l| l.timestamp = 0);
+    let amount = 100i128;
+
+    let id_t = ctx.reach_escrowed(amount, FOUR_WEEKS);
+    ctx.client().cancel_by_traveller(&id_t);
+    let t = ctx.client().get_booking(&id_t);
+    assert!(t.was_cancelled);
+    assert!(!t.was_disputed);
+
+    let id_h = ctx.reach_escrowed(amount, 1_000_000);
+    ctx.mint(&ctx.host, DEFAULT_HOST_CANCEL_FEE);
+    ctx.client().cancel_by_host(&id_h);
+    let h = ctx.client().get_booking(&id_h);
+    assert!(h.was_cancelled);
+    assert!(!h.was_disputed);
+}
+
+#[test]
+fn subsequent_ops_never_reset_was_disputed_true() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.reach_escrowed(amount, 1_000_000);
+    ctx.client().open_dispute(&booking_id);
+    assert!(ctx.client().get_booking(&booking_id).was_disputed);
+
+    // Failed transitions must not clear the flag.
+    assert_eq!(
+        ctx.client().try_check_in(&booking_id),
+        Err(Ok(Error::InvalidStateTransition))
+    );
+    assert_eq!(
+        ctx.client().try_complete(&booking_id),
+        Err(Ok(Error::InvalidStateTransition))
+    );
+    assert_eq!(
+        ctx.client().try_execute_split(&booking_id),
+        Err(Ok(Error::InvalidStateTransition))
+    );
+    assert_eq!(
+        ctx.client().try_cancel_by_traveller(&booking_id),
+        Err(Ok(Error::InvalidStateTransition))
+    );
+    assert!(ctx.client().get_booking(&booking_id).was_disputed);
+
+    // Successful resolve keeps the flag.
+    ctx.client()
+        .resolve_dispute(&booking_id, &10_000, &0, &0, &0, &0, &0);
+    assert!(ctx.client().get_booking(&booking_id).was_disputed);
+
+    // Post-settlement ops must not clear it either.
+    assert_eq!(
+        ctx.client().try_execute_split(&booking_id),
+        Err(Ok(Error::AlreadySettled))
+    );
+    assert_eq!(
+        ctx.client().try_open_dispute(&booking_id),
+        Err(Ok(Error::AlreadySettled))
+    );
+    let b = ctx.client().get_booking(&booking_id);
+    assert!(b.was_disputed);
+    assert_eq!(b.state, BookingState::Completed);
+    assert!(b.settled);
+}
+
+#[test]
+fn get_booking_exposes_was_disputed() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.reach_escrowed(amount, 1_000_000);
+
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
+    assert!(
+        !ctx.client()
+            .get_booking_by_ref(&ctx.client().get_booking(&booking_id).booking_ref)
+            .was_disputed
+    );
+
+    ctx.client().open_dispute(&booking_id);
+    let by_id = ctx.client().get_booking(&booking_id);
+    let by_ref = ctx.client().get_booking_by_ref(&by_id.booking_ref);
+    assert!(by_id.was_disputed);
+    assert!(by_ref.was_disputed);
+}
+
+#[test]
+fn update_and_lock_preserve_was_disputed_false() {
+    let ctx = setup();
+    let amount = 100i128;
+    let booking_id = ctx.fund_and_book(amount, 1_000_000);
+    ctx.client()
+        .update_booking(&booking_id, &ctx.host, &amount, &2_000_000);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
+
+    ctx.client().lock_escrow(&booking_id, &amount);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
+
+    ctx.client().check_in(&booking_id);
+    ctx.client().complete(&booking_id);
+    assert!(!ctx.client().get_booking(&booking_id).was_disputed);
 }

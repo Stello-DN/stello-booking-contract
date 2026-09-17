@@ -172,6 +172,7 @@ impl StelloBookingContract {
             settled: false,
             was_cancelled: false,
             cancelled_by: CancelledBy::None,
+            was_disputed: false,
         };
         set_booking(&env, &booking);
         set_booking_ref_index(&env, &booking_ref, booking_id);
@@ -635,6 +636,7 @@ impl StelloBookingContract {
         }
 
         booking.state = BookingState::Disputed;
+        booking.was_disputed = true;
         set_booking(&env, &booking);
 
         DisputeOpened { booking_id }.publish(&env);
