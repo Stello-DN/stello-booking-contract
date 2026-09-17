@@ -66,6 +66,9 @@ pub struct Booking {
     pub settled: bool,
     pub was_cancelled: bool,
     pub cancelled_by: CancelledBy,
+    /// Irreversible historical flag: true once the booking has ever entered
+    /// `Disputed`. Remains true after `resolve_dispute` returns to `Completed`.
+    pub was_disputed: bool,
 }
 
 /// Traveller-cancel settlement breakdown.
